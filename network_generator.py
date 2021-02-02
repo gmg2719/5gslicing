@@ -184,7 +184,16 @@ class NwkInfrastructure():
 
 class NetworkGenerator():
 
-  def __init__(self, area_width, area_cell_width=0.1):
+  def __init__(self, area_width, area_cell_width=0.1, aggregate_mux_lookup=None):
+    """
+    Create a 5G infrastructure generator.
+
+    Parameters:
+
+    area_width          -- the width of the square area, in kms
+    area_cell_width     -- the area is broken in small cells (in kms)
+    aggregate_mux_lookup-- pickle file object containing lookup table for aggregation.
+    """
     # Define the area as a matrix of cells of configured width
     row_cells = int(np.ceil(area_width/area_cell_width))
     # Need to round up to next square
@@ -196,12 +205,13 @@ class NetworkGenerator():
     self.populations = []
     # Population density in each cell
     self.population_density = np.zeros_like(self.area_cells, dtype=np.float64)
-    self.aggregate_mux_lookup = None
-    try:
-        self.aggregate_mux_lookup = \
-                pickle.load(open('aggregate_mux_lookup', 'rb'))
-    except IOError:
-        print("Aggregate mux lookup not ready yet.")
+    if aggregate_mux_lookup is None:
+      try:
+          aggregate_mux_lookup = open('aggregate_mux_lookup', 'rb')
+      except IOError:
+          print("Aggregate mux lookup not ready yet.")
+          return
+    self.aggregate_mux_lookup = pickle.load(aggregate_mux_lookup)
 
   def dist_from_pdf_centre(self, pdf_centre):
     """
