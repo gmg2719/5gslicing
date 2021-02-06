@@ -369,7 +369,7 @@ class NetworkGenerator():
         p.compute_cores = 400 if rng.random() >= 0.5 else 0
         p.compute_gpus = 20 if rng.random() >= 0.5 else 0
       # One of the PoPs will host the primary video cache of 25TB
-      rng.choice(ring.pops).compute_storage = 25
+      rng.choice(ring.pops).compute_storage = 25000
       # Remove the fcps from the list
       for f in closest_fcps[:15]:
         tmp.remove(f)
@@ -424,7 +424,7 @@ class NetworkGenerator():
       edge_ring.pop2pop_latency = get_latency(30)
       p = rng.choice(edge_ring.pops)
       p.compute_cores = 1000
-      p.compute_storage = 100
+      p.compute_storage = 100000
       # Use the ring_centre as the core FCP
       core_fcp = CoreFCP()
       core_fcp.ring = edge_ring
