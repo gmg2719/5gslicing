@@ -11,6 +11,7 @@ config = {
     'high_density': 0.6, # Ratio of population living in highly dense urban
     'urban': 0.39, # Ratio of population living in regular urban area
     'rural': 0.01, # Ratio of population living in rural area
+    'pdf_width': 5, # Std dev of population density function
     'isd_high': 0.2, # 200m high density ISD, per 3GPP
     'isd_urban': 0.5,
     'isd_rural': 1.7,
@@ -33,6 +34,73 @@ def get_distance(a, b):
   """Computes the distance between two coordinates, provided as (x,y) tuples"""
   return np.sqrt((a[0]-b[0])**2+
                  (a[1]-b[1])**2)
+
+def median_cut(matrix, axis):
+  """
+  Find a cut through the matrix that will split the mass as close to half as
+  possible.
+  Parameters:
+  matrix  -- matrix containing zero and non-zero values
+  axis    -- 0 for row, 1 for column
+  Returns: index of cut
+  """
+  idx = int(matrix.shape[axis]/2)
+  if axis == 0:
+    abs_diff = abs(np.count_nonzero(matrix[:idx,]) - np.count_nonzero(matrix[idx:,]))
+  elif axis == 1:
+    abs_diff = abs(np.count_nonzero(matrix[:,:idx]) - np.count_nonzero(matrix[1,idx:]))
+  # Try to reduce the difference increasing the index
+  while idx < len(matrix):
+    idx += 1
+    if axis == 0:
+      new_diff = abs(np.count_nonzero(matrix[:idx,]) - np.count_nonzero(matrix[idx:,]))
+    elif axis == 1:
+      new_diff = abs(np.count_nonzero(matrix[:,:idx]) - np.count_nonzero(matrix[:,idx:]))
+    if new_diff > abs_diff:
+      idx -= 1
+      break
+    else:
+      abs_diff = new_diff
+  # Try to reduce the difference decreasing the index
+  while idx > 0:
+    idx -= 1
+    if axis == 0:
+      new_diff = abs(np.count_nonzero(matrix[:idx,]) - np.count_nonzero(matrix[idx:,]))
+    elif axis == 1:
+      new_diff = abs(np.count_nonzero(matrix[:,:idx]) - np.count_nonzero(matrix[:,idx:]))
+    if new_diff > abs_diff:
+      idx += 1
+      break
+    else:
+      abs_diff = new_diff
+  return idx
+
+def partition_matrix(matrix, top, right, bot, left, target_mass, min_mass):
+  """
+  Partitions the matrix recursively into smaller areas until their mass is less
+  than the target mass
+  """
+  matrix_mass = np.count_nonzero(matrix)
+  if matrix_mass >= min_mass/2 and matrix_mass < min_mass:
+    return [(top, right, bot, left)]
+  if matrix_mass < min_mass/2:
+    return []
+  r, c = matrix.shape
+  if r >= c:
+    cut_idx = median_cut(matrix, 0)
+    top_mass = np.count_nonzero(matrix[:cut_idx,])
+    bot_mass = np.count_nonzero(matrix[cut_idx:,])
+    #
+    top_cuts = partition_matrix(matrix[:cut_idx,], top, right, top+cut_idx, left, target_mass, min_mass)
+    bot_cuts = partition_matrix(matrix[cut_idx:,], top+cut_idx, right, bot, left, target_mass, min_mass)
+    #return [(cut_idx,0,top,right,left,bot)] + top_cuts + bot_cuts
+    return top_cuts + bot_cuts
+  else:
+    cut_idx = median_cut(matrix, 1)
+    top_cuts = partition_matrix(matrix[:,:cut_idx], top, right, bot, right+cut_idx, target_mass, min_mass)
+    bot_cuts = partition_matrix(matrix[:,cut_idx:], top, right+cut_idx, bot, left, target_mass, min_mass)
+    #return [(cut_idx,1,right,top,bot,left)] + top_cuts + bot_cuts
+    return top_cuts + bot_cuts
 
 class RU():
   """Represents a Radio Unit"""
@@ -184,7 +252,8 @@ class NwkInfrastructure():
 
 class NetworkGenerator():
 
-  def __init__(self, area_width, area_cell_width=0.1, aggregate_mux_lookup=None):
+  def __init__(self, area_width, area_cell_width=0.1, population_centres=2,
+                aggregate_mux_lookup=None):
     """
     Create a 5G infrastructure generator.
 
@@ -192,14 +261,15 @@ class NetworkGenerator():
 
     area_width          -- the width of the square area, in kms
     area_cell_width     -- the area is broken in small cells (in kms)
+    population_centres  -- number of population centres --> # of PDFs deployed
     aggregate_mux_lookup-- pickle file object containing lookup table for aggregation.
     """
     # Define the area as a matrix of cells of configured width
-    row_cells = int(np.ceil(area_width/area_cell_width))
+    self.row_cells = int(np.ceil(area_width/area_cell_width))
     # Need to round up to next square
-    self.num_cells = int(row_cells**2)
+    self.num_cells = int(self.row_cells**2)
     area_cells = np.array(range(self.num_cells))
-    self.area_cells = area_cells.reshape(row_cells, row_cells)
+    self.area_cells = area_cells.reshape(self.row_cells, self.row_cells)
     self.area_cell_width = area_cell_width
     # List of populations deployed
     self.populations = []
@@ -228,11 +298,21 @@ class NetworkGenerator():
     c_x, c_y = pdf_centre
     return np.sqrt((c_x-cell_x)**2 + (c_y-cell_y)**2)
 
-  def generate_demographic(self, centre, pdf_width):
+  def add_population(self, centre=False):
     """
     Add a population distribution over the deployment area.
     The population is a 2D normal distribution with standard deviation (pdf_width)
     expressed in kms, and zero mean.
+    """
+    if not centre:
+      centre = (np.random.randint(0,self.row_cells*self.area_cell_width),
+                np.random.randint(0,self.row_cells*self.area_cell_width))
+    # Compute the PDF for each cell, based on its distance from the centre
+    pdfs = norm.pdf(self.dist_from_pdf_centre(centre), 0, config['pdf_width'])
+    self.population_density += pdfs
+
+  def discretise_population(self):
+    """
     For each cell of the deployment area the population density will be estimated
     and classified as high (urban), common (suburban), and rural.
 
@@ -241,23 +321,22 @@ class NetworkGenerator():
     matrix with each cell containing its index
     matrix with each cell containing the population density
     """
-   # Compute the PDF for each cell, based on its distance from the centre
-    pdfs = norm.pdf(self.dist_from_pdf_centre(centre), 0, pdf_width)
     # Compute the thresholds for population density, based on Quantile function
     # --> P(population density > Threshold) is CDF(x) = Threshold
     # --> we want the threshold so CDF-1(x) which is quantile function
-    ppf_high = norm.ppf(config['high_density'], 0, pdf_width)
+    ppf_high = norm.ppf(config['high_density'], 0, config['pdf_width'])
     ppf_urban = abs(norm.ppf(config['high_density'] + config['urban'],
-                                0, pdf_width))
+                                0, config['pdf_width']))
     # Then convert those values into PDFs
-    thresh_high = norm.pdf(ppf_high, 0, pdf_width)
-    thresh_urban = norm.pdf(ppf_urban, 0, pdf_width)
+    thresh_high = norm.pdf(ppf_high, 0, config['pdf_width'])
+    thresh_urban = norm.pdf(ppf_urban, 0, config['pdf_width'])
     # Discretize the PDF based on the thresholds
+    pdfs = np.zeros_like(self.area_cells, dtype=np.float64)
+    pdfs += self.population_density
     pdfs[pdfs >= thresh_high] = 3
     pdfs[(pdfs >= thresh_urban) & (pdfs < 1)] = 2
     pdfs[pdfs < thresh_urban] = 1
-    # Add the PDF values to the deployment area
-    self.population_density += pdfs
+    self.population_density = pdfs
 
   def _deploy_rus(self):
     """
@@ -308,25 +387,16 @@ class NetworkGenerator():
       tmp = copy.deepcopy(infra.ru_cells)
       # Discard RUs from other density zones
       tmp[pdfs != density] = 0
-      # Process the area by overlaying squares that contain 36 RUs
-      # We call this a site
-      # Start in the top left corner of the area
-      top_y = np.argwhere(np.count_nonzero(pdfs == density, 1))[0][0]
-      top_x = np.argwhere(np.count_nonzero(pdfs == density, 0))[0][0]
-      # Also find the bottom right corner
-      bot_y = np.argwhere(np.count_nonzero(pdfs == density, 1))[-1][0]
-      bot_x = np.argwhere(np.count_nonzero(pdfs == density, 0))[-1][0]
-      # Determine the width of the site in area cells
-      site_width = int(np.ceil(6*isd[density]/self.area_cell_width))
-      # Process the squares
-      for x_c in range(top_x, bot_x, int(site_width)):
-        for y_c in range(top_y, bot_y, int(site_width)):
+      # Partition the resulting RUs into groups of at least 24 and at most 48
+      partitions = partition_matrix(tmp, 0,0,*tmp.shape, 36, 48)
+      # Each partition will result in an access ring
+      for t,r,b,l in partitions:
           fcp_type = 2 if rng.random() < prob_disag[density] else 1
           fcp = AccessFCP(fcp_type)
           # TODO Should have provision in case the number of RUs is too low to aggregate
-          num_rus = np.count_nonzero(tmp[x_c:x_c+site_width, y_c:y_c+site_width])
+          num_rus = np.count_nonzero(tmp[t:b, r:l])
           # Get the coordinates of the RUs
-          fcp.rus = list(map(RU, np.argwhere(tmp[x_c:x_c+site_width, y_c:y_c+site_width]) + [x_c,y_c]))
+          fcp.rus = list(map(RU, np.argwhere(tmp[t:b, r:l]) + [t,r]))
           if fcp_type == 2:
             # For disaggregated, this is Fx interface
             fcp.in_rate = config['rate_fx_peak']
@@ -337,7 +407,7 @@ class NetworkGenerator():
             fcp.out_rate = aggregate_mux(num_rus, None, self.aggregate_mux_lookup)
             # For half of these FCPs we allocate 100 threads
             fcp.compute_threads = 100 if rng.random() >= 0.5 else 0
-          fcp.coords = (int(x_c+site_width/2), int(y_c+site_width/2))
+          fcp.coords = (np.mean([r.x for r in fcp.rus]), np.mean([r.y for r in fcp.rus]))
           infra.access_fcps.append(fcp)
     #------------------
     # Group the access FCPs into access rings and allocate PoPs
